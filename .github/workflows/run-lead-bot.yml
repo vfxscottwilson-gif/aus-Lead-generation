@@ -1,0 +1,112 @@
+name: Run AU Lead Bot
+on:
+  schedule:
+    - cron: "17 19 * * *"
+  workflow_dispatch:
+concurrency:
+  group: au-lead-bot
+  cancel-in-progress: false
+permissions:
+  contents: read
+jobs:
+  validate:
+    uses: ./.github/workflows/validate.yml
+  collect:
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 70
+    env:
+      GOOGLE_SA: ${{ secrets.GOOGLE_SA }}
+      SHEET_ID: ${{ secrets.SHEET_ID }}
+      KEY_CHECK: ${{ vars.KEY_CHECK || 'strict' }}
+      GEMINI_API_KEY_1: ${{ secrets.GEMINI_API_KEY_1 }}
+      GEMINI_API_KEY_2: ${{ secrets.GEMINI_API_KEY_2 }}
+      GEMINI_API_KEY_3: ${{ secrets.GEMINI_API_KEY_3 }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+      MISTRAL_API_KEY: ${{ secrets.MISTRAL_API_KEY }}
+      CEREBRAS_API_KEY: ${{ secrets.CEREBRAS_API_KEY }}
+      GOOGLE_PLACES_API_KEY: ${{ secrets.GOOGLE_PLACES_API_KEY }}
+      YOUTUBE_API_KEY_1: ${{ secrets.YOUTUBE_API_KEY_1 }}
+      YOUTUBE_API_KEY_2: ${{ secrets.YOUTUBE_API_KEY_2 }}
+      HUNTER_API_KEY: ${{ secrets.HUNTER_API_KEY }}
+      ZEROBOUNCE_API_KEY: ${{ secrets.ZEROBOUNCE_API_KEY }}
+      SERPER_API_KEY: ${{ secrets.SERPER_API_KEY }}
+      BRAVE_API_KEY: ${{ secrets.BRAVE_API_KEY }}
+      ZENROWS_API_KEY: ${{ secrets.ZENROWS_API_KEY }}
+      JINA_API_KEY: ${{ secrets.JINA_API_KEY }}
+      ABN_GUID: ${{ secrets.ABN_GUID }}
+      APIFY_API_TOKEN: ${{ secrets.APIFY_API_TOKEN }}
+      APOLLO_API_KEY: ${{ secrets.APOLLO_API_KEY }}
+      IG_ACCESS_TOKEN: ${{ secrets.IG_ACCESS_TOKEN }}
+      IG_USER_ID: ${{ vars.IG_USER_ID }}
+      SNOV_CLIENT_ID: ${{ secrets.SNOV_CLIENT_ID }}
+      SNOV_CLIENT_SECRET: ${{ secrets.SNOV_CLIENT_SECRET }}
+      PROSPEO_API_KEY: ${{ secrets.PROSPEO_API_KEY }}
+      REACHER_URL: ${{ secrets.REACHER_URL }}
+      REACHER_SECRET: ${{ secrets.REACHER_SECRET }}
+      AI_API_KEYS: ${{ secrets.AI_API_KEYS }}
+      YOUTUBE_API_KEYS: ${{ secrets.YOUTUBE_API_KEYS }}
+      PLACES_API_KEYS: ${{ secrets.PLACES_API_KEYS }}
+      ABN_LOOKUP_GUID: ${{ secrets.ABN_LOOKUP_GUID }}
+      USE_JINA: ${{ vars.USE_JINA }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: python -m pip install -r requirements.txt
+      - name: Validate core configuration without printing values
+        id: preflight
+        run: |
+          python - <<'PY'
+          import json, os, re
+          def fail(message):
+              raise SystemExit(message)
+          sid = os.environ.get("SHEET_ID", "").strip()
+          if not re.fullmatch(r"[A-Za-z0-9_-]{25,100}", sid):
+              fail("Set SHEET_ID to the spreadsheet ID, not its URL.")
+          try:
+              sa = json.loads(os.environ.get("GOOGLE_SA", ""))
+          except ValueError:
+              fail("GOOGLE_SA must contain service-account JSON.")
+          if not isinstance(sa, dict) or sa.get("type") != "service_account" or not all(sa.get(k) for k in ("client_email", "private_key", "token_uri")):
+              fail("GOOGLE_SA is missing required service-account fields.")
+          print("Core configuration shape accepted; setup will verify sheet access.")
+          PY
+      - name: Set up tabs and verify sheet access
+        id: setup
+        run: |
+          if ! timeout 8m python src/leadbot.py --setup > /dev/null 2>&1; then
+            echo "::error::Sheet setup failed. Check credentials, sharing permissions and the private sheet Run Log."
+            exit 1
+          fi
+      - name: Collect Australian leads
+        id: collection
+        run: |
+          if ! timeout --signal=TERM --kill-after=30s 50m python src/leadbot.py --no-finish > /dev/null 2>&1; then
+            echo "::error::Collection failed or timed out. Review the private sheet Run Log and API Health."
+            exit 1
+          fi
+      - name: Refresh dashboard after collection
+        id: finish
+        if: ${{ always() && steps.setup.outcome == 'success' }}
+        run: |
+          if ! timeout 8m python src/leadbot.py --finish > /dev/null 2>&1; then
+            echo "::error::Dashboard refresh failed. Review spreadsheet permissions and API quota."
+            exit 1
+          fi
+      - name: Record public-safe execution outcome
+        if: ${{ always() }}
+        env:
+          SETUP_RESULT: ${{ steps.setup.outcome }}
+          COLLECTION_RESULT: ${{ steps.collection.outcome }}
+          FINISH_RESULT: ${{ steps.finish.outcome }}
+        run: |
+          printf 'Setup: %s\nCollection: %s\nDashboard: %s\n' "$SETUP_RESULT" "$COLLECTION_RESULT" "$FINISH_RESULT" >> "$GITHUB_STEP_SUMMARY"
+          echo 'A successful workflow does not establish that new qualified leads were found. Check the private Dashboard and Run Log.' >> "$GITHUB_STEP_SUMMARY"

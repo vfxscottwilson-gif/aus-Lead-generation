@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+local_sheet/
+Local Sheet/
+imports/
+exports/
+*.log
+service-account*.json
+google-sa*.json

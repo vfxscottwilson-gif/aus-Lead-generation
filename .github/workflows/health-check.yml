@@ -1,0 +1,66 @@
+name: Check Collector Health
+on:
+  schedule:
+    - cron: "43 23 * * *"
+  workflow_dispatch:
+permissions:
+  actions: read
+  contents: read
+concurrency:
+  group: au-lead-bot-health
+  cancel-in-progress: false
+jobs:
+  health:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Detect missing stale or failed collector runs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          STALE_HOURS: ${{ vars.COLLECTOR_STALE_HOURS || '36' }}
+        run: |
+          python - <<'PY'
+          import json, math, os
+          from datetime import datetime, timezone
+          from urllib.parse import urlencode
+          from urllib.request import Request, urlopen
+          def fail(message):
+              print("::error::" + message)
+              raise SystemExit(1)
+          try:
+              stale = float(os.environ["STALE_HOURS"])
+              if not math.isfinite(stale) or not 2 <= stale <= 168:
+                  fail("COLLECTOR_STALE_HOURS must be between 2 and 168.")
+              base = os.environ.get("GITHUB_API_URL", "https://api.github.com")
+              query = urlencode({"branch": os.environ["DEFAULT_BRANCH"], "per_page": 100})
+              url = base + "/repos/" + os.environ["GITHUB_REPOSITORY"] + "/actions/workflows/run-lead-bot.yml/runs?" + query
+              req = Request(url, headers={"Authorization": "Bearer " + os.environ["GH_TOKEN"], "Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"})
+              with urlopen(req, timeout=30) as response:
+                  runs = json.load(response)["workflow_runs"]
+              runs = [r for r in runs if r.get("event") in ("schedule", "workflow_dispatch")]
+              now = datetime.now(timezone.utc)
+              def age(run, field):
+                  return (now - datetime.fromisoformat(run[field].replace("Z", "+00:00"))).total_seconds() / 3600
+              runs.sort(key=lambda r: r["created_at"], reverse=True)
+              if not runs:
+                  fail("No collector attempts found on the default branch. Run the collector manually.")
+              if age(runs[0], "created_at") > stale:
+                  fail("Collector attempts are stale. Check whether schedules or Actions are disabled.")
+              if runs[0].get("status") != "completed" and age(runs[0], "created_at") > 2:
+                  fail("Collector has been queued or running for over two hours.")
+              completed = [r for r in runs if r.get("status") == "completed"]
+              if completed and completed[0].get("conclusion") != "success":
+                  fail("Most recent completed collector did not succeed. Inspect its Actions run.")
+              successes = [r for r in completed if r.get("conclusion") == "success"]
+              if not successes or age(successes[0], "updated_at") > stale:
+                  fail("No recent successful collector workflow. Check its Actions run.")
+              print("Collector workflow health is current. Lead yield must be checked in the private Dashboard.")
+          except SystemExit:
+              raise
+          except Exception:
+              fail("Unable to verify collector health. Check Actions read permission and GitHub API availability.")
+          PY
